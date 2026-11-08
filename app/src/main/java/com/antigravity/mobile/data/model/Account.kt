@@ -13,7 +13,7 @@ data class Account(
     val email: String = "",
     val apiKey: String, // Gemini API Key
     val endpointType: EndpointType = EndpointType.GEMINI_API,
-    val modelName: String = "gemini-2.5-flash",
+    val modelName: String = "gemini-3.8-flash",
     val customWorkspaceDir: String = "",
     val isActive: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()

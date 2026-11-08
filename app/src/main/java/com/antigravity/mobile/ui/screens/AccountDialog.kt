@@ -36,7 +36,7 @@ fun AccountDialog(
     var newName by remember { mutableStateOf("") }
     var newEmail by remember { mutableStateOf("") }
     var newApiKey by remember { mutableStateOf("") }
-    var selectedModel by remember { mutableStateOf("gemini-2.5-flash") }
+    var selectedModel by remember { mutableStateOf("gemini-3.8-flash") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -72,6 +72,28 @@ fun AccountDialog(
                         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                         singleLine = true
                     )
+
+                    Text(
+                        text = "Underlying Agent Model:",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = selectedModel == "gemini-3.8-flash",
+                            onClick = { selectedModel = "gemini-3.8-flash" },
+                            label = { Text("Gemini 3.8 Flash") }
+                        )
+                        FilterChip(
+                            selected = selectedModel == "gemini-4-argon",
+                            onClick = { selectedModel = "gemini-4-argon" },
+                            label = { Text("Gemini 4 Argon") }
+                        )
+                    }
+
                     Text(
                         text = "Your API key is securely encrypted with hardware-backed Android Keystore.",
                         style = MaterialTheme.typography.bodySmall,

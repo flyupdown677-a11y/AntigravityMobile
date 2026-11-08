@@ -1,6 +1,9 @@
 package com.antigravity.mobile.engine
 
 import android.util.Log
+import com.antigravity.mobile.data.model.Account
+import com.antigravity.mobile.data.remote.InteractionsApiService
+import com.antigravity.mobile.data.remote.RemoteInteractionUpdate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,14 +31,32 @@ sealed class EngineEvent {
 }
 
 /**
- * WebSocket IPC client that bridges the native Android UI
- * to the headless Antigravity daemon running inside PRoot Debian.
+ * Dual-Mode Engine Bridge:
+ * 1. Cloud-Native Mode (Google GenAI Interactions API `antigravity-preview-09-2026`) - Default & Recommended.
+ * 2. Local Container Mode (Headless PRoot Debian daemon over WebSocket).
  */
 class AntigravityBridge(
     private val scope: CoroutineScope,
     private val port: Int = 18080
 ) {
     private val tag = "AntigravityBridge"
+
+    private val remoteApiService = InteractionsApiService()
+
+    // Active session configuration
+    var activeAccount: Account? = null
+
+    private val _activeEnvironmentId = MutableStateFlow<String?>(null)
+    val activeEnvironmentId: StateFlow<String?> = _activeEnvironmentId.asStateFlow()
+
+    private val _lastInteractionId = MutableStateFlow<String?>(null)
+    val lastInteractionId: StateFlow<String?> = _lastInteractionId.asStateFlow()
+
+    private val _activeModel = MutableStateFlow("gemini-3.8-flash")
+    val activeModel: StateFlow<String> = _activeModel.asStateFlow()
+
+    private val _useCloudApi = MutableStateFlow(true)
+    val useCloudApi: StateFlow<Boolean> = _useCloudApi.asStateFlow()
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -52,7 +73,33 @@ class AntigravityBridge(
 
     private val currentTurnAccumulator = StringBuilder()
 
+    init {
+        // Cloud API is ready by default
+        _isConnected.value = true
+    }
+
+    fun setModel(modelName: String) {
+        _activeModel.value = modelName
+    }
+
+    fun setUseCloudApi(enable: Boolean) {
+        _useCloudApi.value = enable
+    }
+
+    fun resetRemoteEnvironment() {
+        _activeEnvironmentId.value = null
+        _lastInteractionId.value = null
+        scope.launch {
+            _engineEvents.emit(EngineEvent.StatusChanged("reset", "Cloud Sandbox Environment reset. Next prompt will provision a fresh container."))
+        }
+    }
+
     fun connect() {
+        if (_useCloudApi.value) {
+            _isConnected.value = true
+            return
+        }
+
         val request = Request.Builder()
             .url("ws://127.0.0.1:$port/ws")
             .build()
@@ -65,7 +112,7 @@ class AntigravityBridge(
 
             override fun onMessage(ws: WebSocket, text: String) {
                 scope.launch(Dispatchers.Default) {
-                    handleMessage(text)
+                    handleLocalMessage(text)
                 }
             }
 
@@ -83,7 +130,7 @@ class AntigravityBridge(
         })
     }
 
-    private suspend fun handleMessage(text: String) {
+    private suspend fun handleLocalMessage(text: String) {
         try {
             val json = JSONObject(text)
             when (json.optString("type")) {
@@ -126,11 +173,103 @@ class AntigravityBridge(
     }
 
     fun sendChatPrompt(prompt: String) {
-        val payload = JSONObject().apply {
-            put("action", "chat")
-            put("prompt", prompt)
+        val account = activeAccount
+        if (account == null || account.apiKey.isBlank()) {
+            scope.launch {
+                _engineEvents.emit(EngineEvent.ErrorOccurred("No Gemini API Key configured. Please select or add an account."))
+            }
+            return
         }
-        webSocket?.send(payload.toString())
+
+        if (_useCloudApi.value) {
+            // Dispatch via Google GenAI Cloud Interactions API
+            scope.launch {
+                try {
+                    remoteApiService.executeInteraction(
+                        apiKey = account.apiKey,
+                        prompt = prompt,
+                        modelName = _activeModel.value,
+                        environmentId = _activeEnvironmentId.value,
+                        previousInteractionId = _lastInteractionId.value
+                    ).collect { update ->
+                        when (update) {
+                            is RemoteInteractionUpdate.Started -> {
+                                _lastInteractionId.value = update.interactionId
+                                if (update.environmentId != null) {
+                                    _activeEnvironmentId.value = update.environmentId
+                                }
+                            }
+                            is RemoteInteractionUpdate.StatusChanged -> {
+                                _engineEvents.emit(
+                                    EngineEvent.StatusChanged(
+                                        status = update.status,
+                                        workspace = _activeEnvironmentId.value ?: "Cloud Sandbox"
+                                    )
+                                )
+                            }
+                            is RemoteInteractionUpdate.StepAdded -> {
+                                val step = update.step
+                                when (step.type) {
+                                    "thought" -> {
+                                        step.thought?.let { _engineEvents.emit(EngineEvent.ThoughtDelta(it)) }
+                                    }
+                                    "code_execution_call" -> {
+                                        _engineEvents.emit(
+                                            EngineEvent.ToolCall(
+                                                callId = step.id ?: "exec",
+                                                toolName = "code_execution",
+                                                argsJson = step.code ?: "{}"
+                                            )
+                                        )
+                                    }
+                                    "google_search_call" -> {
+                                        _engineEvents.emit(
+                                            EngineEvent.ToolCall(
+                                                callId = step.id ?: "search",
+                                                toolName = "google_search",
+                                                argsJson = step.arguments?.toString() ?: "{}"
+                                            )
+                                        )
+                                    }
+                                    "url_context_call" -> {
+                                        _engineEvents.emit(
+                                            EngineEvent.ToolCall(
+                                                callId = step.id ?: "url",
+                                                toolName = "url_context",
+                                                argsJson = step.arguments?.toString() ?: "{}"
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                            is RemoteInteractionUpdate.OutputChunk -> {
+                                _engineEvents.emit(EngineEvent.TokenDelta(update.text))
+                            }
+                            is RemoteInteractionUpdate.Completed -> {
+                                _lastInteractionId.value = update.interactionId
+                                if (update.environmentId != null) {
+                                    _activeEnvironmentId.value = update.environmentId
+                                }
+                                _engineEvents.emit(EngineEvent.TurnFinished(update.finalOutput))
+                            }
+                            is RemoteInteractionUpdate.Failed -> {
+                                _engineEvents.emit(EngineEvent.ErrorOccurred(update.error))
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(tag, "Cloud interaction execution failed", e)
+                    _engineEvents.emit(EngineEvent.ErrorOccurred(e.message ?: "Failed to execute interaction"))
+                }
+            }
+        } else {
+            // Local Daemon WebSocket Mode
+            val payload = JSONObject().apply {
+                put("action", "chat")
+                put("prompt", prompt)
+            }
+            webSocket?.send(payload.toString())
+        }
     }
 
     fun approveTool(callId: String, approved: Boolean) {

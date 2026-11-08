@@ -58,10 +58,17 @@ fun ChatScreen(
     var currentStreamingText by remember { mutableStateOf("") }
     var isAgentBusy by remember { mutableStateOf(false) }
 
-    // Listen to bridge events from Debian container
+    val activeEnvironmentId by (bridge?.activeEnvironmentId?.collectAsState() ?: remember { mutableStateOf(null) })
+    val activeModel by (bridge?.activeModel?.collectAsState() ?: remember { mutableStateOf("gemini-3.8-flash") })
+    var currentStatusText by remember { mutableStateOf<String?>(null) }
+
+    // Listen to bridge events from Cloud Interactions API or Container
     LaunchedEffect(bridge) {
         bridge?.engineEvents?.collect { event ->
             when (event) {
+                is EngineEvent.StatusChanged -> {
+                    currentStatusText = event.workspace
+                }
                 is EngineEvent.TokenDelta -> {
                     isAgentBusy = true
                     currentStreamingText += event.token
@@ -69,6 +76,10 @@ fun ChatScreen(
                 is EngineEvent.ThoughtDelta -> {
                     isAgentBusy = true
                     currentThinking = (currentThinking ?: "") + event.thought
+                }
+                is EngineEvent.ToolCall -> {
+                    isAgentBusy = true
+                    currentStatusText = "Executing ${event.toolName} in remote sandbox..."
                 }
                 is EngineEvent.TurnFinished -> {
                     messages.add(
@@ -82,6 +93,7 @@ fun ChatScreen(
                     currentStreamingText = ""
                     currentThinking = null
                     isAgentBusy = false
+                    currentStatusText = null
                     coroutineScope.launch {
                         listState.animateScrollToItem(messages.size)
                     }
@@ -95,8 +107,8 @@ fun ChatScreen(
                         )
                     )
                     isAgentBusy = false
+                    currentStatusText = null
                 }
-                else -> Unit
             }
         }
     }
@@ -107,25 +119,23 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text(
-                            text = activeProject?.name ?: "Antigravity Project",
+                            text = "Antigravity Cloud Agent",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Debian Headless Virtual Environment",
+                            text = if (activeEnvironmentId != null) "Sandbox: $activeEnvironmentId" else "Remote Linux Container (Google Managed)",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
                 actions = {
-                    // Open in Files button
-                    IconButton(onClick = {
-                        activeProject?.let {
-                            StoragePermissionHelper.openProjectInFileManager(context, File(it.absolutePath))
+                    // Reset Cloud Sandbox button
+                    if (activeEnvironmentId != null) {
+                        IconButton(onClick = { bridge?.resetRemoteEnvironment() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Reset Sandbox Container")
                         }
-                    }) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = "Open Folder in Files")
                     }
 
                     // Account switch pill
@@ -280,7 +290,11 @@ fun ChatScreen(
                 // In-flight streaming response
                 if (isAgentBusy) {
                     item {
-                        InFlightBubble(thinking = currentThinking, text = currentStreamingText)
+                        InFlightBubble(
+                            thinking = currentThinking,
+                            text = currentStreamingText,
+                            statusText = currentStatusText
+                        )
                     }
                 }
             }
@@ -418,7 +432,7 @@ fun MessageBubble(message: AgentMessage) {
 }
 
 @Composable
-fun InFlightBubble(thinking: String?, text: String) {
+fun InFlightBubble(thinking: String?, text: String, statusText: String? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -461,7 +475,11 @@ fun InFlightBubble(thinking: String?, text: String) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Antigravity is working...", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        text = statusText ?: "Antigravity Cloud Agent is working...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

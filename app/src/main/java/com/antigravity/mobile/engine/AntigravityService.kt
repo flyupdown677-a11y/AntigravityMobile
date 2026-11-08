@@ -52,6 +52,10 @@ class AntigravityService : Service() {
         )
 
         createNotificationChannel()
+
+        // Initialize AntigravityBridge immediately so Cloud Interactions API is ready
+        val bridge = AntigravityBridge(serviceScope, port = 18080)
+        antigravityBridge = bridge
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -61,23 +65,33 @@ class AntigravityService : Service() {
     }
 
     fun startSession(account: Account, projectDir: File, onReady: () -> Unit) {
+        val bridge = antigravityBridge ?: AntigravityBridge(serviceScope, port = 18080).also {
+            antigravityBridge = it
+        }
+        bridge.activeAccount = account
+        bridge.setModel(account.modelName)
+
         serviceScope.launch {
             wakeLock?.acquire(30 * 60 * 1000L) // 30 min max
 
-            updateNotification("Launching Debian Virtual Container...")
-            val ready = containerManager.setupContainerIfNeeded()
-            if (ready) {
-                updateNotification("Starting Antigravity agent in ${projectDir.name}...")
-                containerManager.startAntigravityEngine(account, projectDir, port = 18080)
-
-                // Initialize WebSocket bridge
-                val bridge = AntigravityBridge(serviceScope, port = 18080)
-                antigravityBridge = bridge
-                bridge.connect()
-
-                updateNotification("Antigravity Active: ${account.name}")
+            if (bridge.useCloudApi.value) {
+                // Cloud-native mode: Google GenAI Interactions API (antigravity-preview-09-2026)
+                updateNotification("Antigravity Cloud Agent Active: ${account.name}")
                 withContext(Dispatchers.Main) {
                     onReady()
+                }
+            } else {
+                // Local Debian Container mode
+                updateNotification("Launching Debian Virtual Container...")
+                val ready = containerManager.setupContainerIfNeeded()
+                if (ready) {
+                    updateNotification("Starting Antigravity agent in ${projectDir.name}...")
+                    containerManager.startAntigravityEngine(account, projectDir, port = 18080)
+                    bridge.connect()
+                    updateNotification("Antigravity Local Container Active: ${account.name}")
+                    withContext(Dispatchers.Main) {
+                        onReady()
+                    }
                 }
             }
         }
