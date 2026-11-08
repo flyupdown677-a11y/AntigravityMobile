@@ -7,6 +7,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,16 +23,16 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Grant execute permission for gradlew
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.10.2
+
+    - name: Generate Gradle Wrapper
       run: |
-        if [ -f gradlew ]; then
-          chmod +x gradlew
-        else
-          gradle wrapper --gradle-version 8.10.2
-          chmod +x gradlew
-        fi
+        gradle wrapper --gradle-version 8.10.2
+        chmod +x gradlew
 
     - name: Build Debug APK
       run: ./gradlew assembleDebug --stacktrace
@@ -39,3 +42,19 @@ jobs:
       with:
         name: Antigravity-Mobile-Debug-APK
         path: app/build/outputs/apk/debug/*.apk
+
+    - name: Create or Update GitHub Release
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0.0
+        name: "Antigravity Mobile v1.0.0 (Cloud Sandbox)"
+        body: |
+          ### Antigravity Mobile for Android
+          - Powered by Google GenAI Interactions API (`antigravity-preview-09-2026`)
+          - Remote cloud Linux sandbox container with unrestricted network egress
+          - Built with Jetpack Compose & Material 3
+          - Models: Gemini 3.8 Flash & Gemini 4 Argon
+        files: app/build/outputs/apk/debug/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
